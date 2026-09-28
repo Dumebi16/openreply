@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockPrisma, mockSends, mockClassify, mockContacts } = vi.hoisted(() => ({
+const { mockPrisma, mockSends, mockClassify, mockContacts, mockUsage } = vi.hoisted(() => ({
   mockPrisma: {
     conversationState: { findUnique: vi.fn(), upsert: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() },
     automation: { findFirst: vi.fn() },
+    dmLog: { upsert: vi.fn() },
   },
+  mockUsage: { reserveWorkspaceDMSend: vi.fn(), releaseWorkspaceDMReservation: vi.fn() },
   mockSends: {
     sendDirectMessageWithPostbackButtons: vi.fn(),
     sendPrivateReplyWithPostbackButtons: vi.fn(),
@@ -22,6 +24,7 @@ vi.mock("@/lib/instagram/provider", async (orig) => ({
 }));
 vi.mock("@/lib/flows/classify", () => ({ classifyReply: mockClassify }));
 vi.mock("@/lib/contacts/record", () => mockContacts);
+vi.mock("@/lib/billing/usage", () => mockUsage);
 
 import { loadActiveState, saveState } from "../lib/flows/state";
 import { handleFlowPostback, handleFlowReply, startFlow } from "../lib/flows/runtime";
@@ -57,6 +60,54 @@ beforeEach(() => {
   mockSends.sendDirectMessageWithPostbackButtons.mockResolvedValue({ message_id: "m" });
   mockSends.sendPrivateReplyWithPostbackButtons.mockResolvedValue({ message_id: "m" });
   mockSends.sendDirectMessageWithLinkButton.mockResolvedValue({ message_id: "m" });
+  mockPrisma.dmLog.upsert.mockResolvedValue({});
+  mockUsage.reserveWorkspaceDMSend.mockResolvedValue({ allowed: true, reserved: true, remaining: 10, limit: 100, periodStart: new Date("2026-09-01") });
+  mockUsage.releaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
+});
+
+describe("accounting", () => {
+  it("reserves a workspace DM and writes a DmLog row for each flow send", async () => {
+    await startFlow({ accessToken: ctx, automation, userId: "u_1", commenterName: "jane", via: { kind: "dm" } });
+    expect(mockUsage.reserveWorkspaceDMSend).toHaveBeenCalledWith("ws_1");
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { automationId_commentId: { automationId: "auto_1", commentId: "flow:who:u_1" } },
+      create: expect.objectContaining({ workspaceId: "ws_1", automationId: "auto_1", instagramAccountId: "acct_1", commenterId: "u_1", status: "SENT", commentText: "(flow: who)" }),
+    }));
+  });
+
+  it("does not send and logs SKIPPED_PLAN_LIMIT when the monthly cap is reached", async () => {
+    mockUsage.reserveWorkspaceDMSend.mockResolvedValue({ allowed: false, reserved: false, remaining: 0, limit: 100, periodStart: new Date("2026-09-01") });
+    await startFlow({ accessToken: ctx, automation, userId: "u_1", commenterName: null, via: { kind: "dm" } });
+    expect(mockSends.sendDirectMessageWithPostbackButtons).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ status: "SKIPPED_PLAN_LIMIT" }),
+    }));
+  });
+
+  it("releases the reservation and logs FAILED when the send throws", async () => {
+    mockSends.sendDirectMessageWithPostbackButtons.mockRejectedValueOnce(new Error("boom"));
+    await expect(startFlow({ accessToken: ctx, automation, userId: "u_1", commenterName: null, via: { kind: "dm" } })).rejects.toThrow("boom");
+    expect(mockUsage.releaseWorkspaceDMReservation).toHaveBeenCalledWith("ws_1", new Date("2026-09-01"));
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ status: "FAILED", errorMessage: "boom" }),
+    }));
+  });
+});
+
+describe("a stored definition that no longer validates", () => {
+  const broken = { ...automation, flow: { id: "flow_1", isActive: true, definition: { entryStepKey: "nope", fallbackStepKey: "x", steps: [] } } };
+
+  it("clears the person's state and returns false on a typed reply", async () => {
+    mockPrisma.conversationState.findUnique.mockResolvedValue({ id: "s1", flowId: "flow_1", currentStepKey: "who", expiresAt: new Date(Date.now() + 60_000) });
+    mockPrisma.automation.findFirst.mockResolvedValue(broken);
+    const createContext = vi.fn(async () => ctx);
+    expect(await handleFlowReply({ instagramAccountId: "acct_1", instagramId: "ig_1", senderId: "u_1", text: "hi", createContext })).toBe(false);
+    expect(mockPrisma.conversationState.deleteMany).toHaveBeenCalledWith({ where: { instagramAccountId: "acct_1", igUserId: "u_1" } });
+  });
+
+  it("returns false on a button tap instead of throwing", async () => {
+    expect(await handleFlowPostback({ accessToken: ctx, automation: broken, userId: "u_1", commenterName: null, payload: "flow:flow_1:who:owner" })).toBe(false);
+  });
 });
 
 describe("state", () => {

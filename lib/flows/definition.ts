@@ -60,9 +60,11 @@ export function validateFlowDefinition(input: unknown): FlowDefinition {
   mustExist(def.entryStepKey, "entryStepKey");
   mustExist(def.fallbackStepKey, "fallbackStepKey");
   for (const step of def.steps) {
-    if (step.options && step.message.length > 640) {
+    // Both button questions and link deliveries go out as button templates,
+    // which Instagram caps at 640 characters of text.
+    if ((step.options || step.deliverLink) && step.message.length > 640) {
       throw new FlowDefinitionError(
-        `step "${step.key}": message must be 640 characters or fewer when it has buttons`
+        `step "${step.key}": message must be 640 characters or fewer when it has buttons or delivers the link`
       );
     }
     const optionKeys = new Set<string>();

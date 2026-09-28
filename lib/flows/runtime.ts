@@ -8,12 +8,17 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { recordContactEvent, recordGuideDelivery } from "@/lib/contacts/record";
+import {
+  releaseWorkspaceDMReservation,
+  reserveWorkspaceDMSend,
+} from "@/lib/billing/usage";
 import { TRACKED_LINK_ORDER } from "@/lib/tracking/link-order";
 import { buildTrackedUrl, renderMessageWithoutLink } from "@/lib/tracking/message";
 import { classifyReply } from "./classify";
 import {
   decodeFlowPostback,
   encodeFlowPostback,
+  FlowDefinitionError,
   stepByKey,
   validateFlowDefinition,
   type FlowDefinition,
@@ -48,6 +53,71 @@ export function hasActiveFlow(automation: FlowAutomation): boolean {
 
 function definitionOf(automation: FlowAutomation): FlowDefinition {
   return validateFlowDefinition(automation.flow!.definition);
+}
+
+/**
+ * A stored definition that no longer validates (schema tightened, row edited
+ * by hand) must never wedge a person's DMs. Returns null and logs instead of
+ * throwing so callers can clear state and fall through.
+ */
+function safeDefinitionOf(automation: FlowAutomation): FlowDefinition | null {
+  try {
+    return definitionOf(automation);
+  } catch (error) {
+    if (error instanceof FlowDefinitionError) {
+      console.error(
+        `[Flows] Flow ${automation.flow?.id} for campaign ${automation.id} has an invalid definition: ${error.message}`
+      );
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Record one flow send in DmLog so dashboards and reports count it, keyed so
+ * a retried job updates rather than duplicates the row.
+ */
+async function logFlowSend({
+  automation,
+  userId,
+  commenterName,
+  stepKey,
+  status,
+  errorMessage,
+}: {
+  automation: FlowAutomation;
+  userId: string;
+  commenterName: string | null;
+  stepKey: string;
+  status: "SENT" | "FAILED" | "SKIPPED_PLAN_LIMIT";
+  errorMessage?: string | null;
+}) {
+  const commentId = `flow:${stepKey}:${userId}`;
+  const sentAt = status === "SENT" ? new Date() : undefined;
+  await prisma.dmLog
+    .upsert({
+      where: { automationId_commentId: { automationId: automation.id, commentId } },
+      create: {
+        workspaceId: automation.workspaceId,
+        automationId: automation.id,
+        instagramAccountId: automation.instagramAccountId,
+        commenterId: userId,
+        commenterName,
+        commentText: `(flow: ${stepKey})`,
+        commentId,
+        status,
+        dmSentAt: sentAt,
+        errorMessage: errorMessage ?? null,
+      },
+      update: { status, dmSentAt: sentAt, errorMessage: errorMessage ?? null },
+    })
+    .catch((error: unknown) => {
+      console.warn(
+        "[Flows] DmLog write failed (ignored):",
+        error instanceof Error ? error.message : String(error)
+      );
+    });
 }
 
 function isTemplateRejection(error: unknown): boolean {
@@ -174,11 +244,39 @@ async function runActions({
   via: FlowVia;
 }) {
   for (const action of actions) {
-    if (action.type === "deliver_link") {
-      await deliverFlowLink({ accessToken, automation, userId, commenterName, step: action.step });
-    } else {
-      await sendStepMessage({ accessToken, automation, userId, commenterName, step: action.step, via });
+    const stepKey = action.step.key;
+    // Same monthly-cap accounting as every other send path in the worker.
+    const usage = await reserveWorkspaceDMSend(automation.workspaceId);
+    if (!usage.allowed) {
+      await logFlowSend({
+        automation,
+        userId,
+        commenterName,
+        stepKey,
+        status: "SKIPPED_PLAN_LIMIT",
+        errorMessage: `Monthly DM limit reached (${usage.limit})`,
+      });
+      return;
     }
+    try {
+      if (action.type === "deliver_link") {
+        await deliverFlowLink({ accessToken, automation, userId, commenterName, step: action.step });
+      } else {
+        await sendStepMessage({ accessToken, automation, userId, commenterName, step: action.step, via });
+      }
+    } catch (error) {
+      await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
+      await logFlowSend({
+        automation,
+        userId,
+        commenterName,
+        stepKey,
+        status: "FAILED",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    await logFlowSend({ automation, userId, commenterName, stepKey, status: "SENT" });
   }
   await saveState({
     instagramAccountId: automation.instagramAccountId,
@@ -218,7 +316,16 @@ export async function handleFlowPostback({
   if (!decoded || !hasActiveFlow(automation) || decoded.flowId !== automation.flow!.id) {
     return false;
   }
-  const def = definitionOf(automation);
+  const def = safeDefinitionOf(automation);
+  if (!def) {
+    await saveState({
+      instagramAccountId: automation.instagramAccountId,
+      igUserId: userId,
+      flowId: automation.flow!.id,
+      currentStepKey: null,
+    });
+    return false;
+  }
   const state = await loadActiveState(automation.instagramAccountId, userId);
   const input: FlowInput = {
     kind: "postback",
@@ -279,7 +386,11 @@ export async function handleFlowReply({
     return false;
   }
 
-  const def = definitionOf(automation);
+  const def = safeDefinitionOf(automation);
+  if (!def) {
+    await saveState({ instagramAccountId, igUserId: senderId, flowId: state.flowId, currentStepKey: null });
+    return false;
+  }
   const step = stepByKey(def, state.currentStepKey);
   const classified = step?.options
     ? await classifyReply({

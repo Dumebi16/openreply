@@ -58,6 +58,12 @@ describe("validateFlowDefinition", () => {
     expect(() => validateFlowDefinition(bad)).toThrow(/640/);
   });
 
+  it("rejects a link-delivery message over 640 characters (it is sent as a button template)", () => {
+    const bad = JSON.parse(JSON.stringify(valid));
+    bad.steps[1].message = "y".repeat(641);
+    expect(() => validateFlowDefinition(bad)).toThrow(/640/);
+  });
+
   it("rejects duplicate step keys and an unknown entry step", () => {
     const dup = JSON.parse(JSON.stringify(valid));
     dup.steps.push({ key: "who", message: "again" });
