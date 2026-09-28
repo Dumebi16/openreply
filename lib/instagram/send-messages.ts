@@ -163,6 +163,75 @@ export async function sendDirectMessageWithButton({
   });
 }
 
+export type PostbackButton = { title: string; payload: string };
+
+function postbackButtonList(buttons: PostbackButton[]): Button[] {
+  return buttons
+    .slice(0, 3)
+    .map(({ title, payload }) => ({ type: "postback", title: title.slice(0, 20), payload }));
+}
+
+export async function sendDirectMessageWithPostbackButtons({
+  context,
+  instagramAccountId,
+  userId,
+  text,
+  buttons,
+}: {
+  context: InstagramContext;
+  instagramAccountId: string;
+  userId: string;
+  text: string;
+  buttons: PostbackButton[];
+}) {
+  if (context.provider === "META")
+    return meta.sendDirectMessageWithPostbackButtons(
+      context.accessToken,
+      instagramAccountId,
+      userId,
+      text,
+      buttons
+    );
+  return sendZernioMessage({
+    context,
+    recipientId: userId,
+    text,
+    buttons: postbackButtonList(buttons),
+  });
+}
+
+export async function sendPrivateReplyWithPostbackButtons({
+  context,
+  instagramAccountId,
+  commentId,
+  text,
+  buttons,
+  postId,
+}: {
+  context: InstagramContext;
+  instagramAccountId: string;
+  commentId: string;
+  text: string;
+  buttons: PostbackButton[];
+  postId?: string;
+}) {
+  if (context.provider === "META")
+    return meta.sendPrivateReplyWithPostbackButtons(
+      context.accessToken,
+      instagramAccountId,
+      commentId,
+      text,
+      buttons
+    );
+  return sendZernioMessage({
+    context,
+    commentId,
+    postId,
+    text,
+    buttons: postbackButtonList(buttons),
+  });
+}
+
 export async function sendPrivateReplyWithLinkButton({
   context,
   instagramAccountId,

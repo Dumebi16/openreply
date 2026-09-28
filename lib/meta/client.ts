@@ -254,6 +254,62 @@ export async function sendDirectMessageWithButton(
   return handleResponse(response);
 }
 
+export type PostbackButtonSpec = { title: string; payload: string };
+
+function postbackButtons(buttons: PostbackButtonSpec[]) {
+  return buttons
+    .slice(0, 3)
+    .map(({ title, payload }) => ({ type: "postback", title: title.slice(0, 20), payload }));
+}
+
+/** Direct message with up to three postback buttons (flow questions). */
+export async function sendDirectMessageWithPostbackButtons(
+  accessToken: string,
+  instagramAccountId: string,
+  userId: string,
+  text: string,
+  buttons: PostbackButtonSpec[]
+): Promise<{ recipient_id: string; message_id: string }> {
+  const response = await fetch(`${instagramGraphBase()}/${instagramAccountId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({
+      recipient: { id: userId },
+      message: {
+        attachment: {
+          type: "template",
+          payload: { template_type: "button", text: text.slice(0, 640), buttons: postbackButtons(buttons) },
+        },
+      },
+    }),
+  });
+  return handleResponse(response);
+}
+
+/** Private reply to a comment with up to three postback buttons. */
+export async function sendPrivateReplyWithPostbackButtons(
+  accessToken: string,
+  instagramAccountId: string,
+  commentId: string,
+  text: string,
+  buttons: PostbackButtonSpec[]
+): Promise<{ recipient_id: string; message_id: string }> {
+  const response = await fetch(`${instagramGraphBase()}/${instagramAccountId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({
+      recipient: { comment_id: commentId },
+      message: {
+        attachment: {
+          type: "template",
+          payload: { template_type: "button", text: text.slice(0, 640), buttons: postbackButtons(buttons) },
+        },
+      },
+    }),
+  });
+  return handleResponse(response);
+}
+
 /**
  * Check whether a user (by their IGSID) follows the business account, via the
  * Instagram Messaging profile API. Available for users in an active
