@@ -83,6 +83,7 @@ model Workspace {
   dmLogs            DmLog[]
   trackedLinks      TrackedLink[]
   linkClicks        LinkClick[]
+  flows             Flow[]
   webhookEvents     WebhookEvent[]
   operationalEvents OperationalEvent[]
 
@@ -217,6 +218,7 @@ model Automation {
   linkClicks       LinkClick[]
   contactEvents    ContactEvent[]
   guideDeliveries  GuideDelivery[]
+  flow             Flow?
 
   @@index([workspaceId])
   @@index([instagramAccountId])
@@ -509,4 +511,48 @@ model GuideDelivery {
 
   @@unique([contactId, automationId])
   @@index([automationId, deliveredAt])
+}
+
+// ---------------------------------------------------------------------------
+// Flows (Stage 2). A Flow is attached 1:1 to a campaign and takes over at the
+// moment the campaign would otherwise reveal the link. Steps live in
+// `definition` as JSON validated by lib/flows/definition.ts.
+// ---------------------------------------------------------------------------
+
+model Flow {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  automationId String   @unique
+  name         String
+  isActive     Boolean  @default(true)
+  /// Validated FlowDefinition (see lib/flows/definition.ts).
+  definition   Json
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspace  Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  states     ConversationState[]
+
+  @@index([workspaceId])
+}
+
+/// Where one person is inside one flow. One row per person per account;
+/// expiresAt enforces Meta's 24-hour messaging window.
+model ConversationState {
+  id                 String   @id @default(cuid())
+  instagramAccountId String
+  /// Instagram-scoped user id (same value as Contact.igUserId).
+  igUserId           String
+  flowId             String
+  currentStepKey     String
+  expiresAt          DateTime
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  flow Flow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  @@unique([instagramAccountId, igUserId])
+  @@index([flowId])
+  @@index([expiresAt])
 }
