@@ -58,4 +58,4 @@ EXPOSE 3000
 # variable instead: the worker service sets START_COMMAND="npm run worker",
 # the web service can set "npm run db:migrate && npm run start". Compose /
 # stack files may still use `command:` as before.
-CMD ["sh", "-c", "exec ${START_COMMAND:-npm run start}"]
+CMD ["sh", "-c", "${START_COMMAND:-npm run start}"]
