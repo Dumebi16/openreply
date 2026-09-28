@@ -8,6 +8,24 @@ export class ConnectionError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
+/**
+ * Origins a state-changing request may come from. Behind a reverse proxy
+ * (Railway, Dokploy, nginx) `request.url` is the internal address, e.g.
+ * http://host:8080, while the browser sends the public https origin, so the
+ * public URL (NEXTAUTH_URL) and the forwarded host/proto are accepted too.
+ */
+function allowedOrigins(request: Request): Set<string> {
+  const origins = new Set<string>([new URL(request.url).origin]);
+  const publicUrl = process.env.NEXTAUTH_URL;
+  if (publicUrl) {
+    try { origins.add(new URL(publicUrl).origin); } catch { /* ignore malformed */ }
+  }
+  const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() || 'https';
+  if (forwardedHost) origins.add(`${forwardedProto}://${forwardedHost}`);
+  return origins;
+}
+
 export function withZernioManagement(handler: (context: WorkspaceContext, request: Request) => Promise<Response>) {
   return async (request: Request) => {
     try {
@@ -16,7 +34,7 @@ export function withZernioManagement(handler: (context: WorkspaceContext, reques
       if (!canManageWorkspace(context.role)) throw new ConnectionError('Only workspace owners and admins can manage the Zernio connection.', 403);
       if (request.method !== 'GET') {
         const origin = request.headers.get('origin');
-        if (origin && origin !== new URL(request.url).origin) throw new ConnectionError('Invalid request origin.', 403);
+        if (origin && !allowedOrigins(request).has(origin)) throw new ConnectionError('Invalid request origin.', 403);
       }
       return await handler(context, request);
     } catch (error) {
