@@ -51,14 +51,27 @@ export function renderMessageWithoutLink({
     .trim();
 }
 
-export function buildTrackedUrl(slug: string, baseUrl?: string) {
+/**
+ * Build the public redirect URL for a tracked link.
+ *
+ * `clickRef` is the recipient's Instagram-scoped user id. When present it is
+ * appended as `?c=<id>` so the click can be attributed to the person the DM
+ * went to (see app/r/[slug]/route.ts). Links without it behave exactly as
+ * before: the click is still counted, just anonymously.
+ */
+export function buildTrackedUrl(
+  slug: string,
+  baseUrl?: string,
+  clickRef?: string | null
+) {
   const resolvedBaseUrl =
     baseUrl ??
     (typeof window !== "undefined"
       ? window.location.origin
       : process.env.NEXTAUTH_URL ?? "http://localhost:3000");
 
-  return `${resolvedBaseUrl.replace(/\/$/, "")}/r/${slug}`;
+  const url = `${resolvedBaseUrl.replace(/\/$/, "")}/r/${slug}`;
+  return clickRef ? `${url}?c=${encodeURIComponent(clickRef)}` : url;
 }
 
 export function renderMessageWithTracking({
@@ -66,18 +79,21 @@ export function renderMessageWithTracking({
   commenterName,
   trackedLinks,
   baseUrl,
+  clickRef,
 }: {
   message: string;
   commenterName?: string | null;
   trackedLinks?: MessageTrackedLink[];
   baseUrl?: string;
+  /** Recipient's Instagram user id, for per-person click attribution. */
+  clickRef?: string | null;
 }) {
   let rendered = message.replace(/\{username\}/gi, commenterName ?? "there");
   const primaryLink = trackedLinks?.[0];
 
   if (!primaryLink) return rendered;
 
-  const trackedUrl = buildTrackedUrl(primaryLink.slug, baseUrl);
+  const trackedUrl = buildTrackedUrl(primaryLink.slug, baseUrl, clickRef);
 
   if (/\{link\}/i.test(rendered)) {
     return rendered.replace(/\{link\}/gi, trackedUrl);

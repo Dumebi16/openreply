@@ -39,6 +39,10 @@ import {
 } from "@/lib/billing/usage";
 import { recordWorkerAlert } from "@/lib/ops/worker-health";
 import {
+  recordContactEvent,
+  recordGuideDelivery,
+} from "@/lib/contacts/record";
+import {
   buildTrackedUrl,
   renderMessageWithTracking,
   renderMessageWithoutLink,
@@ -98,10 +102,11 @@ type WorkerTrackedLink = {
  */
 function buildLinkButtons(
   trackedLinks: WorkerTrackedLink[],
-  primaryLabel: string | null
+  primaryLabel: string | null,
+  clickRef?: string | null
 ): { title: string; url: string }[] {
   return trackedLinks.slice(0, 3).map((link, index) => ({
-    url: buildTrackedUrl(link.slug),
+    url: buildTrackedUrl(link.slug, undefined, clickRef),
     title:
       (index === 0 ? primaryLabel : link.label) || link.label || "Open link",
   }));
@@ -116,14 +121,19 @@ function buildInlineLinkFallback(
   message: string,
   commenterName: string | null | undefined,
   trackedLinks: WorkerTrackedLink[],
-  bodyText: string
+  bodyText: string,
+  clickRef?: string | null
 ): string {
   const base =
-    renderMessageWithTracking({ message, commenterName, trackedLinks }) ||
-    bodyText;
+    renderMessageWithTracking({
+      message,
+      commenterName,
+      trackedLinks,
+      clickRef,
+    }) || bodyText;
   const extraUrls = trackedLinks
     .slice(1)
-    .map((link) => buildTrackedUrl(link.slug));
+    .map((link) => buildTrackedUrl(link.slug, undefined, clickRef));
   return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
 }
 
@@ -161,6 +171,7 @@ async function sendRevealDirectMessage({
         message: automation.dmMessage,
         commenterName,
         trackedLinks: automation.trackedLinks,
+        clickRef: userId,
       }),
     });
     return;
@@ -174,7 +185,8 @@ async function sendRevealDirectMessage({
     }) || "Here's your link:";
   const buttons = buildLinkButtons(
     automation.trackedLinks,
-    automation.linkButtonLabel
+    automation.linkButtonLabel,
+    userId
   );
 
   try {
@@ -203,7 +215,8 @@ async function sendRevealDirectMessage({
           automation.dmMessage,
           commenterName,
           automation.trackedLinks,
-          bodyText
+          bodyText,
+          userId
         ),
       });
     } catch {
@@ -291,6 +304,28 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // Skip only when there is genuinely nothing left to do. A comment whose DM
     // already sent but whose public reply never posted (e.g. it hit a rate
     // limit) must still come back so the public reply can be retried.
+    // Contact timeline: first time this comment reaches this campaign.
+    if (!existingLog) {
+      await recordContactEvent(
+        {
+          instagramAccountId: automation.instagramAccountId,
+          igUserId: commenterId,
+          username: commenterName,
+        },
+        {
+          type: "COMMENT",
+          automationId: automation.id,
+          inbound: true,
+          meta: {
+            commentId,
+            mediaId,
+            matchedKeyword: matchResult.matchedKeyword,
+            text: commentText,
+          },
+        }
+      );
+    }
+
     if (existingLog?.status === "SKIPPED_PLAN_LIMIT") continue;
     if (
       !needsDm &&
@@ -427,6 +462,18 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           },
           data: { publicReplySentAt: new Date(), publicReplyError: null },
         });
+        await recordContactEvent(
+          {
+            instagramAccountId: automation.instagramAccountId,
+            igUserId: commenterId,
+            username: commenterName,
+          },
+          {
+            type: "PUBLIC_REPLY",
+            automationId: automation.id,
+            meta: { commentId, text: publicReply },
+          }
+        );
       } catch (error) {
         console.error(
           "[DM Worker] Public comment reply failed:",
@@ -594,6 +641,19 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         context: accessToken,
         recipientId: commenterId,
       });
+      await recordContactEvent(
+        {
+          instagramAccountId: automation.instagramAccountId,
+          igUserId: commenterId,
+          username: commenterName,
+        },
+        {
+          type: "FOLLOW_CHECK",
+          automationId: automation.id,
+          isFollower: alreadyFollows,
+          meta: { result: alreadyFollows, at: "comment" },
+        }
+      );
       sendFollowPrompt =
         accessToken.provider === "ZERNIO"
           ? alreadyFollows === false
@@ -643,7 +703,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           }) || "Here's your link:";
         const buttons = buildLinkButtons(
           automation.trackedLinks,
-          automation.linkButtonLabel
+          automation.linkButtonLabel,
+          commenterId
         );
 
         try {
@@ -669,7 +730,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
             automation.dmMessage,
             commenterName,
             automation.trackedLinks,
-            bodyText
+            bodyText,
+            commenterId
           );
           try {
             await sendPrivateReply({
@@ -691,6 +753,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           message: automation.dmMessage,
           commenterName,
           trackedLinks: automation.trackedLinks,
+          clickRef: commenterId,
         });
         await sendPrivateReply({
           context: accessToken,
@@ -714,6 +777,30 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: null,
         },
       });
+
+      // Contact timeline. The guide only counts as delivered when the link
+      // itself went out, not when an opening DM or follow prompt did.
+      const contactKey = {
+        instagramAccountId: automation.instagramAccountId,
+        igUserId: commenterId,
+        username: commenterName,
+      };
+      const linkDelivered = !useOpeningDm && !sendFollowPrompt;
+      await recordContactEvent(contactKey, {
+        type: "DM_SENT",
+        automationId: automation.id,
+        meta: {
+          via: useOpeningDm
+            ? "opening_dm"
+            : sendFollowPrompt
+              ? "follow_prompt"
+              : "link",
+          commentId,
+        },
+      });
+      if (linkDelivered) {
+        await recordGuideDelivery(contactKey, { automationId: automation.id });
+      }
     } catch (error) {
       // The rate slot was reserved before the send; this send did not deliver a
       // DM, so hand the slot back instead of burning it (and burning more on
@@ -822,6 +909,16 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     return;
   }
 
+  await recordContactEvent(
+    { instagramAccountId: automation.instagramAccountId, igUserId: userId },
+    {
+      type: "BUTTON_TAP",
+      automationId: automation.id,
+      inbound: !fallback,
+      meta: { payload, fallback: Boolean(fallback) },
+    }
+  );
+
   // Duplicate sends are enabled: every button tap re-sends the reveal
   // instead of only firing once per person.
   const dedupeId = `reveal:${userId}`;
@@ -884,6 +981,19 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       context: accessToken,
       recipientId: userId,
     });
+    await recordContactEvent(
+      {
+        instagramAccountId: automation.instagramAccountId,
+        igUserId: userId,
+        username: commenterName,
+      },
+      {
+        type: "FOLLOW_CHECK",
+        automationId: automation.id,
+        isFollower: follows,
+        meta: { result: follows, at: fallback ? "fallback" : "button_tap" },
+      }
+    );
     if (follows === false) {
       if (fallback) return;
       const promptText = renderMessageWithoutLink({
@@ -1002,6 +1112,19 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       },
       update: { status: "SENT", dmSentAt: new Date(), errorMessage: null },
     });
+
+    // Contact timeline: a reveal is the guide itself.
+    const contactKey = {
+      instagramAccountId: automation.instagramAccountId,
+      igUserId: userId,
+      username: commenterName,
+    };
+    await recordContactEvent(contactKey, {
+      type: "DM_SENT",
+      automationId: automation.id,
+      meta: { via: "reveal", payload },
+    });
+    await recordGuideDelivery(contactKey, { automationId: automation.id });
   } catch (error) {
     await releaseWorkspaceDMReservation(
       automation.workspaceId,
@@ -1134,6 +1257,32 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
 
   const dedupeId = `dm:${messageId}`;
 
+  // Contact timeline: record the inbound DM even when no campaign matches, so
+  // the flows engine can later see what people typed.
+  const inboundAccount = automations[0]
+    ? { id: automations[0].instagramAccountId }
+    : await prisma.instagramAccount
+        .findFirst({
+          where: {
+            instagramId: instagramAccountId,
+            ...(job.data.accountConnectionId
+              ? { id: job.data.accountConnectionId }
+              : {}),
+          },
+          select: { id: true },
+        })
+        .catch(() => null);
+  if (inboundAccount) {
+    await recordContactEvent(
+      { instagramAccountId: inboundAccount.id, igUserId: senderId },
+      {
+        type: "DM_IN",
+        inbound: true,
+        meta: { messageId, text: messageText },
+      }
+    );
+  }
+
   for (const automation of automations) {
     const matchResult = automation.matchAnyWord
       ? { matched: true, matchedKeyword: null }
@@ -1243,6 +1392,19 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         context: accessToken,
         recipientId: senderId,
       });
+      await recordContactEvent(
+        {
+          instagramAccountId: automation.instagramAccountId,
+          igUserId: senderId,
+          username: commenterName,
+        },
+        {
+          type: "FOLLOW_CHECK",
+          automationId: automation.id,
+          isFollower: follows,
+          meta: { result: follows, at: "dm_trigger" },
+        }
+      );
       sendFollowPrompt =
         accessToken.provider === "ZERNIO"
           ? follows === false
@@ -1336,6 +1498,21 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           errorMessage: null,
         },
       });
+
+      // Contact timeline.
+      const contactKey = {
+        instagramAccountId: automation.instagramAccountId,
+        igUserId: senderId,
+        username: commenterName,
+      };
+      await recordContactEvent(contactKey, {
+        type: "DM_SENT",
+        automationId: automation.id,
+        meta: { via: sendFollowPrompt ? "follow_prompt" : "reveal", messageId },
+      });
+      if (!sendFollowPrompt) {
+        await recordGuideDelivery(contactKey, { automationId: automation.id });
+      }
     } catch (error) {
       await releaseWorkspaceDMReservation(
         automation.workspaceId,

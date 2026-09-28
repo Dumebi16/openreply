@@ -144,6 +144,7 @@ model InstagramAccount {
   dmLogs      DmLog[]
   linkClicks  LinkClick[]
   followerSnapshots FollowerSnapshot[]
+  contacts    Contact[]
 
   @@index([workspaceId])
 }
@@ -214,6 +215,8 @@ model Automation {
   dmLogs           DmLog[]
   trackedLinks     TrackedLink[]
   linkClicks       LinkClick[]
+  contactEvents    ContactEvent[]
+  guideDeliveries  GuideDelivery[]
 
   @@index([workspaceId])
   @@index([instagramAccountId])
@@ -303,17 +306,22 @@ model LinkClick {
   ipHash             String?
   userAgent          String?
   referrer           String?
+  /// Set when the link carried a `c=<igUserId>` reference, so the click is
+  /// attributed to the person it was sent to. Null for anonymous clicks.
+  contactId          String?
   createdAt          DateTime @default(now())
 
   workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   automation       Automation       @relation(fields: [automationId], references: [id], onDelete: Cascade)
   instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
   trackedLink      TrackedLink      @relation(fields: [trackedLinkId], references: [id], onDelete: Cascade)
+  contact          Contact?         @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId])
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([trackedLinkId])
+  @@index([contactId])
   @@index([createdAt])
   @@index([workspaceId, createdAt])
 }
@@ -415,4 +423,90 @@ model ZernioConnection {
 model PostbackDelivery {
   id String @id
   createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Contact tracking (additive, Stage 1 of the flows work).
+//
+// One row per Instagram user per connected account, plus an append-only
+// timeline of what they did. Nothing in the send paths reads these tables yet;
+// they exist so the future flows engine can consult history (guide already
+// delivered? follower? clicked?) instead of reconstructing it from DmLog.
+// Writes are best-effort: a failure here never blocks a send.
+// ---------------------------------------------------------------------------
+
+enum ContactEventType {
+  COMMENT
+  DM_IN
+  DM_SENT
+  PUBLIC_REPLY
+  BUTTON_TAP
+  FOLLOW_CHECK
+  LINK_CLICK
+  GUIDE_DELIVERED
+  EMAIL_CAPTURED
+}
+
+model Contact {
+  id                 String   @id @default(cuid())
+  instagramAccountId String
+  /// Instagram-scoped user id (IGSID). Same id arrives on comment and
+  /// messaging webhooks for one person.
+  igUserId           String
+  username           String?
+  email              String?
+  emailCapturedAt    DateTime?
+  /// Last known follow status; null = never checked or API could not say.
+  isFollower         Boolean?
+  followCheckedAt    DateTime?
+  tags               String[] @default([])
+  firstSeenAt        DateTime @default(now())
+  /// Last time this person sent something to us (comment, DM, tap).
+  lastInboundAt      DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  events           ContactEvent[]
+  guideDeliveries  GuideDelivery[]
+  linkClicks       LinkClick[]
+
+  @@unique([instagramAccountId, igUserId])
+  @@index([instagramAccountId, lastInboundAt])
+  @@index([email])
+}
+
+model ContactEvent {
+  id            String           @id @default(cuid())
+  contactId     String
+  type          ContactEventType
+  automationId  String?
+  /// Plain ids, deliberately not relations, so DmLog / TrackedLink stay untouched.
+  dmLogId       String?
+  trackedLinkId String?
+  meta          Json?
+  createdAt     DateTime         @default(now())
+
+  contact    Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  automation Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
+
+  @@index([contactId, createdAt])
+  @@index([automationId, type])
+  @@index([type, createdAt])
+}
+
+/// "This person already received this campaign's guide." The per-person
+/// duplicate guard the flows engine will read before releasing a link.
+model GuideDelivery {
+  id           String   @id @default(cuid())
+  contactId    String
+  automationId String
+  dmLogId      String?
+  deliveredAt  DateTime @default(now())
+
+  contact    Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, automationId])
+  @@index([automationId, deliveredAt])
 }
