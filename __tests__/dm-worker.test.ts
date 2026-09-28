@@ -16,6 +16,9 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockSendDirectMessageWithPostbackButtons,
+  mockSendPrivateReplyWithPostbackButtons,
+  mockClassifyReply,
 } = vi.hoisted(() => ({
   mockPrisma: {
     zernioConnection: { findUnique: vi.fn() },
@@ -37,7 +40,15 @@ const {
     operationalEvent: {
       create: vi.fn(),
     },
+    conversationState: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      deleteMany: vi.fn(),
+    },
   },
+  mockSendDirectMessageWithPostbackButtons: vi.fn(),
+  mockSendPrivateReplyWithPostbackButtons: vi.fn(),
+  mockClassifyReply: vi.fn(),
   mockSendPrivateReply: vi.fn(),
   mockSendPrivateReplyWithLinkButton: vi.fn(),
   mockSendPrivateReplyWithButton: vi.fn(),
@@ -66,6 +77,8 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
+  sendDirectMessageWithPostbackButtons: mockSendDirectMessageWithPostbackButtons,
+  sendPrivateReplyWithPostbackButtons: mockSendPrivateReplyWithPostbackButtons,
   sendCommentReply: vi.fn(),
   MetaApiError: class MetaApiError extends Error {
     code: number;
@@ -90,6 +103,10 @@ vi.mock("@/lib/meta/client", () => ({
 
 vi.mock("@/lib/meta/oauth", () => ({
   decryptToken: mockDecryptToken,
+}));
+
+vi.mock("@/lib/flows/classify", () => ({
+  classifyReply: mockClassifyReply,
 }));
 
 vi.mock("@/lib/utils/keyword-matcher", () => ({
@@ -341,6 +358,7 @@ describe("DM Worker — Full Pipeline", () => {
           // tie breakers, so tied rows can never come back swapped.
           orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }],
         },
+        flow: { select: { id: true, isActive: true, definition: true } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -1399,5 +1417,100 @@ describe("durable Zernio postback delivery", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("flows", () => {
+  const flowDefinition = {
+    entryStepKey: "who",
+    fallbackStepKey: "any_link",
+    steps: [
+      {
+        key: "who",
+        message: "Owner or starter?",
+        options: [
+          { key: "owner", label: "Running a business", next: "owner_link" },
+          { key: "starter", label: "Just starting", next: "starter_link" },
+        ],
+      },
+      { key: "owner_link", message: "Owner 👇", deliverLink: true },
+      { key: "starter_link", message: "Starter 👇", deliverLink: true },
+      { key: "any_link", message: "Either way 👇", deliverLink: true },
+    ],
+  };
+  const flowAutomation = () => ({
+    ...mockAutomation,
+    matchAnyPost: true,
+    dmMessage: "Here 👇",
+    linkButtonLabel: "Get The Free Guide",
+    requireFollow: false,
+    dmTriggerEnabled: true,
+    followUpEnabled: false,
+    followUpDelayMinutes: 0,
+    trackedLinks: [{ slug: "abc123", label: null, destinationUrl: "https://example.com/x" }],
+    flow: { id: "flow_1", isActive: true, definition: flowDefinition },
+  });
+  const argsOf = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls[0] as unknown[];
+
+  beforeEach(() => {
+    mockPrisma.conversationState.findUnique.mockResolvedValue(null);
+    mockPrisma.conversationState.upsert.mockResolvedValue({});
+    mockPrisma.conversationState.deleteMany.mockResolvedValue({ count: 0 });
+    mockSendPrivateReplyWithPostbackButtons.mockResolvedValue({ message_id: "m" });
+    mockSendDirectMessageWithPostbackButtons.mockResolvedValue({ message_id: "m" });
+    mockSendDirectMessageWithLinkButton.mockResolvedValue({ message_id: "m" });
+    mockClassifyReply.mockResolvedValue(null);
+  });
+
+  it("a comment on a campaign with a flow gets the question as a private reply, not the link", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([flowAutomation()]);
+    mockPrisma.dmLog.findUnique.mockResolvedValue(null);
+    mockPrisma.dmLog.findFirst.mockResolvedValue(null);
+    mockMatchKeywords.mockReturnValue({ matched: true, matchedKeyword: "guide" });
+    const processor = getProcessor();
+    await processor(createMockJob());
+    const call = argsOf(mockSendPrivateReplyWithPostbackButtons);
+    expect(call).toContain("comment_555");
+    expect(call.find(Array.isArray)).toEqual([
+      { title: "Running a business", payload: "flow:flow_1:who:owner" },
+      { title: "Just starting", payload: "flow:flow_1:who:starter" },
+    ]);
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockPrisma.conversationState.upsert).toHaveBeenCalled();
+  });
+
+  it("a flow button tap delivers the tailored link", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(flowAutomation());
+    mockPrisma.dmLog.findFirst.mockResolvedValue(null);
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "flow:flow_1:who:owner" })
+    );
+    const call = argsOf(mockSendDirectMessageWithLinkButton);
+    expect(call).toContain("commenter_999");
+    expect(call).toContain("Owner 👇");
+    expect(call.find(Array.isArray)).toEqual([
+      { title: "Get The Free Guide", url: "http://localhost:3000/r/abc123?c=commenter_999" },
+    ]);
+    expect(mockPrisma.conversationState.deleteMany).toHaveBeenCalled();
+  });
+
+  it("a typed reply with an active state is routed by the flow and skips keyword matching", async () => {
+    mockPrisma.conversationState.findUnique.mockResolvedValue({
+      id: "s1", flowId: "flow_1", currentStepKey: "who", expiresAt: new Date(Date.now() + 60_000),
+    });
+    mockPrisma.automation.findMany.mockResolvedValue([flowAutomation()]);
+    mockPrisma.automation.findFirst.mockResolvedValue(flowAutomation());
+    mockMatchKeywords.mockClear();
+    const processor = getProcessor();
+    await processor({
+      name: "process-message",
+      data: { instagramAccountId: "ig_456", messageId: "mid_1", messageText: "not sure", senderId: "commenter_999" },
+      id: "msg_1",
+      attemptsMade: 0,
+    });
+    const call = argsOf(mockSendDirectMessageWithLinkButton);
+    expect(call).toContain("Either way 👇");
+    expect(mockMatchKeywords).not.toHaveBeenCalled();
   });
 });

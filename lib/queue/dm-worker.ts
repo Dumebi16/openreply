@@ -42,6 +42,15 @@ import {
   recordContactEvent,
   recordGuideDelivery,
 } from "@/lib/contacts/record";
+import { decodeFlowPostback } from "@/lib/flows/definition";
+import {
+  FLOW_INCLUDE,
+  handleFlowPostback,
+  handleFlowReply,
+  hasActiveFlow,
+  startFlow,
+  type FlowAutomation,
+} from "@/lib/flows/runtime";
 import {
   buildTrackedUrl,
   renderMessageWithTracking,
@@ -137,12 +146,7 @@ function buildInlineLinkFallback(
   return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
 }
 
-type RevealAutomation = {
-  dmMessage: string;
-  linkButtonLabel: string | null;
-  trackedLinks: WorkerTrackedLink[];
-  instagramAccount: { instagramId: string };
-};
+type RevealAutomation = FlowAutomation;
 
 /**
  * Deliver a campaign's reveal message as a direct message. Shared by the
@@ -161,7 +165,13 @@ async function sendRevealDirectMessage({
   userId: string;
   commenterName: string | null;
   context: string;
-}): Promise<void> {
+}): Promise<{ delivered: "link" | "flow" }> {
+  // A campaign with a flow asks its question here instead of handing over
+  // the link; the flow delivers the link itself at a later step.
+  if (hasActiveFlow(automation)) {
+    await startFlow({ accessToken, automation, userId, commenterName, via: { kind: "dm" } });
+    return { delivered: "flow" };
+  }
   if (automation.trackedLinks.length === 0) {
     await sendDirectMessage({
       context: accessToken,
@@ -174,7 +184,7 @@ async function sendRevealDirectMessage({
         clickRef: userId,
       }),
     });
-    return;
+    return { delivered: "link" };
   }
 
   // Try button template first; if Meta rejects it, fall back to inline links.
@@ -223,6 +233,7 @@ async function sendRevealDirectMessage({
       throw buttonError;
     }
   }
+  return { delivered: "link" };
 }
 
 
@@ -270,6 +281,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         },
         orderBy: TRACKED_LINK_ORDER,
       },
+      ...FLOW_INCLUDE,
     },
     orderBy: { createdAt: "asc" },
   });
@@ -694,6 +706,16 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           payload: `followcheck:${automation.id}`,
           postId: mediaId,
         });
+      } else if (automation.trackedLinks.length > 0 && hasActiveFlow(automation)) {
+        // The campaign has a flow: ask its first question as the one private
+        // reply this comment allows. The flow delivers the link later.
+        await startFlow({
+          accessToken,
+          automation,
+          userId: commenterId,
+          commenterName: commenterName ?? null,
+          via: { kind: "private_reply", commentId, postId: mediaId },
+        });
       } else if (automation.trackedLinks.length > 0) {
         // Try button template first; if Meta rejects it, fall back to inline links.
         const bodyText =
@@ -785,7 +807,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         igUserId: commenterId,
         username: commenterName,
       };
-      const linkDelivered = !useOpeningDm && !sendFollowPrompt;
+      const linkDelivered =
+        !useOpeningDm && !sendFollowPrompt && !hasActiveFlow(automation);
       await recordContactEvent(contactKey, {
         type: "DM_SENT",
         automationId: automation.id,
@@ -883,14 +906,17 @@ async function sendPostbackOnce({
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
 
+  const flowPayload = decodeFlowPostback(payload);
   const isFollowCheck = payload.startsWith("followcheck:");
-  if (!isFollowCheck && !payload.startsWith("reveal:")) return;
-  const automationId = payload.slice(
-    isFollowCheck ? "followcheck:".length : "reveal:".length,
-  );
+  if (!flowPayload && !isFollowCheck && !payload.startsWith("reveal:")) return;
+  const automationId = flowPayload
+    ? null
+    : payload.slice(isFollowCheck ? "followcheck:".length : "reveal:".length);
 
   const automation = await prisma.automation.findFirst({
-    where: { id: automationId, isActive: true, ...connectionScope(job.data) },
+    where: flowPayload
+      ? { flow: { id: flowPayload.flowId }, isActive: true, ...connectionScope(job.data) }
+      : { id: automationId!, isActive: true, ...connectionScope(job.data) },
     include: {
       instagramAccount: true,
       workspace: true,
@@ -898,6 +924,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         select: { slug: true, label: true, destinationUrl: true },
         orderBy: TRACKED_LINK_ORDER,
       },
+      ...FLOW_INCLUDE,
     },
   });
 
@@ -906,6 +933,30 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     automation.instagramAccount.instagramId !== instagramAccountId ||
     !hasInstagramCredentials(automation.instagramAccount)
   ) {
+    return;
+  }
+
+  if (flowPayload) {
+    let flowContext: InstagramContext;
+    try {
+      flowContext = await createInstagramContext(
+        automation.instagramAccount,
+        `${job.id}:${automation.id}`,
+      );
+    } catch {
+      return;
+    }
+    const flowLog = await prisma.dmLog.findFirst({
+      where: { automationId: automation.id, commenterId: userId },
+      select: { commenterName: true },
+    });
+    await handleFlowPostback({
+      accessToken: flowContext,
+      automation: automation as FlowAutomation,
+      userId,
+      commenterName: flowLog?.commenterName ?? null,
+      payload,
+    });
     return;
   }
 
@@ -1052,16 +1103,18 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   }
 
   try {
+    let revealOutcome: { delivered: "link" | "flow" } = { delivered: "link" };
     const delivered = await sendPostbackOnce({
       operationId,
-      send: () =>
-        sendRevealDirectMessage({
+      send: async () => {
+        revealOutcome = await sendRevealDirectMessage({
           accessToken: accessToken,
           automation: automation,
           userId: userId,
           commenterName: commenterName,
           context: "postback",
-        }),
+        });
+      },
     });
     if (!delivered) {
       await releaseWorkspaceDMReservation(
@@ -1122,9 +1175,11 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     await recordContactEvent(contactKey, {
       type: "DM_SENT",
       automationId: automation.id,
-      meta: { via: "reveal", payload },
+      meta: { via: revealOutcome.delivered === "flow" ? "flow_start" : "reveal", payload },
     });
-    await recordGuideDelivery(contactKey, { automationId: automation.id });
+    if (revealOutcome.delivered === "link") {
+      await recordGuideDelivery(contactKey, { automationId: automation.id });
+    }
   } catch (error) {
     await releaseWorkspaceDMReservation(
       automation.workspaceId,
@@ -1251,6 +1306,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         select: { slug: true, label: true, destinationUrl: true },
         orderBy: TRACKED_LINK_ORDER,
       },
+      ...FLOW_INCLUDE,
     },
     orderBy: { createdAt: "asc" },
   });
@@ -1281,6 +1337,22 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         meta: { messageId, text: messageText },
       }
     );
+  }
+
+  // Someone mid-conversation: the flow answers, keyword campaigns do not.
+  if (inboundAccount) {
+    const routed = await handleFlowReply({
+      instagramAccountId: inboundAccount.id,
+      instagramId: instagramAccountId,
+      senderId,
+      text: messageText,
+      createContext: (flowAutomation) =>
+        createInstagramContext(
+          flowAutomation.instagramAccount as Parameters<typeof createInstagramContext>[0],
+          `${job.id}:flow`
+        ),
+    });
+    if (routed) return;
   }
 
   for (const automation of automations) {
@@ -1433,6 +1505,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       continue;
     }
 
+    let revealOutcome: { delivered: "link" | "flow" } = { delivered: "link" };
     try {
       if (sendFollowPrompt) {
         const promptText = renderMessageWithoutLink({
@@ -1450,7 +1523,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           payload: `followcheck:${automation.id}`,
         });
       } else {
-        await sendRevealDirectMessage({
+        revealOutcome = await sendRevealDirectMessage({
           accessToken: accessToken,
           automation: automation,
           userId: senderId,
@@ -1508,9 +1581,16 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       await recordContactEvent(contactKey, {
         type: "DM_SENT",
         automationId: automation.id,
-        meta: { via: sendFollowPrompt ? "follow_prompt" : "reveal", messageId },
+        meta: {
+          via: sendFollowPrompt
+            ? "follow_prompt"
+            : revealOutcome.delivered === "flow"
+              ? "flow_start"
+              : "reveal",
+          messageId,
+        },
       });
-      if (!sendFollowPrompt) {
+      if (!sendFollowPrompt && revealOutcome.delivered === "link") {
         await recordGuideDelivery(contactKey, { automationId: automation.id });
       }
     } catch (error) {
