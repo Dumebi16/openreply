@@ -79,6 +79,20 @@ describe("validateFlowDefinition", () => {
   });
 });
 
+describe("deliverLink slots", () => {
+  it("accepts true (all links), \"primary\" and \"secondary\", and rejects other strings", () => {
+    const withSlot = (v: unknown) => {
+      const d = JSON.parse(JSON.stringify(valid));
+      d.steps[1].deliverLink = v;
+      return d;
+    };
+    expect(validateFlowDefinition(withSlot(true)).steps[1].deliverLink).toBe(true);
+    expect(validateFlowDefinition(withSlot("primary")).steps[1].deliverLink).toBe("primary");
+    expect(validateFlowDefinition(withSlot("secondary")).steps[1].deliverLink).toBe("secondary");
+    expect(() => validateFlowDefinition(withSlot("third"))).toThrow(FlowDefinitionError);
+  });
+});
+
 describe("postback codec", () => {
   it("round-trips", () => {
     const p = encodeFlowPostback("flow_1", "who", "owner");

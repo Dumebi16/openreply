@@ -8,24 +8,38 @@
         "key": "who",
         "message": "Quick one before I send it 👇 Are you running a business already, or just getting started?",
         "options": [
-          { "key": "owner", "label": "Running a business", "next": "owner_link" },
+          { "key": "owner", "label": "Running a business", "next": "owner_call" },
           { "key": "starter", "label": "Just starting", "next": "starter_link" }
         ]
       },
       {
-        "key": "owner_link",
-        "message": "Here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇\n\nAnd when you're ready to systemise the whole business, the $99 Business Systems Blueprint is the next step: https://agamaco.gumroad.com/l/business-systems-blueprint",
+        "key": "owner_call",
+        "message": "Nice 🙌 Want a free 30-min call to map out the systems that'd save you the most time?",
+        "options": [
+          { "key": "yes", "label": "Yes, book a call", "next": "yes_call" },
+          { "key": "no", "label": "No, just the guide", "next": "no_guide" }
+        ],
+        "fallbackNext": "yes_call"
+      },
+      {
+        "key": "yes_call",
+        "message": "Love it 🔥 Grab a slot below, and the free business email guide is yours too 👇",
         "deliverLink": true
+      },
+      {
+        "key": "no_guide",
+        "message": "All good bro 🔥 here's the full step-by-step to own your business email for basically free. Grab it below 👇",
+        "deliverLink": "primary"
       },
       {
         "key": "starter_link",
         "message": "Here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇\n\nTip: set the email up first, everything else hangs off it.",
-        "deliverLink": true
+        "deliverLink": "primary"
       },
       {
         "key": "any_link",
         "message": "Either way, here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇",
-        "deliverLink": true
+        "deliverLink": "primary"
       }
     ]
   }

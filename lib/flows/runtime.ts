@@ -188,10 +188,19 @@ async function deliverFlowLink({
   const text =
     renderMessageWithoutLink({ message: step.message, commenterName }) || "Here's your link:";
   const instagramAccountId = automation.instagramAccount.instagramId;
-  const buttons = automation.trackedLinks.slice(0, 3).map((link, index) => ({
+  const slot = step.deliverLink;
+  const chosen = automation.trackedLinks
+    .slice(0, 3)
+    .map((link, index) => ({ link, index }))
+    .filter(({ index }) =>
+      slot === "primary" ? index === 0 : slot === "secondary" ? index === 1 : true
+    );
+  const buttons = chosen.map(({ link, index }) => ({
     url: buildTrackedUrl(link.slug, undefined, userId),
     title: (index === 0 ? automation.linkButtonLabel : link.label) || link.label || "Open link",
   }));
+  // The guide is the campaign's primary link; only count it delivered when it went out.
+  const guideDelivered = chosen.some(({ index }) => index === 0) || chosen.length === 0;
   if (buttons.length === 0) {
     await sendDirectMessage({ context: accessToken, instagramAccountId, userId, message: text });
   } else {
@@ -221,9 +230,11 @@ async function deliverFlowLink({
   await recordContactEvent(key, {
     type: "DM_SENT",
     automationId: automation.id,
-    meta: { via: "flow_link", step: step.key },
+    meta: { via: "flow_link", step: step.key, slot: slot === true ? "all" : slot },
   });
-  await recordGuideDelivery(key, { automationId: automation.id });
+  if (guideDelivered) {
+    await recordGuideDelivery(key, { automationId: automation.id });
+  }
 }
 
 async function runActions({

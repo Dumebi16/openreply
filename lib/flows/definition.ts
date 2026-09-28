@@ -18,7 +18,11 @@ const stepSchema = z.object({
     .min(1)
     .max(3, "a step can have at most 3 buttons")
     .optional(),
-  deliverLink: z.boolean().optional(),
+  /**
+   * Send the campaign's tracked link(s) with this message. `true` = every
+   * link as buttons, "primary" = first link only, "secondary" = second only.
+   */
+  deliverLink: z.union([z.boolean(), z.literal("primary"), z.literal("secondary")]).optional(),
   fallbackNext: z.string().min(1).optional(),
 });
 

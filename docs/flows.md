@@ -10,8 +10,10 @@ follow gate) is unchanged.
 - `fallbackStepKey`: where unclear typed replies go. Must not ask a question.
 - `steps[]`: each has a `key`, a `message`, and either
   - `options[]` (1–3 buttons, label ≤ 20 chars; `next` names a step), or
-  - nothing (a terminal message), optionally `deliverLink: true` to send the
-    campaign's tracked link buttons with this message.
+  - nothing (a terminal message), optionally `deliverLink` to send the
+    campaign's tracked link buttons with this message: `true` = every link,
+    `"primary"` = the first link only (the guide), `"secondary"` = the second
+    link only (e.g. a booking page set as the campaign's second link).
 - `{username}` in a message is replaced by the person's name when known.
 
 Taps come back as `flow:<flowId>:<step>:<option>` postbacks. Typed replies are

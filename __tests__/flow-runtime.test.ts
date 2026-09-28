@@ -94,6 +94,49 @@ describe("accounting", () => {
   });
 });
 
+describe("link slots", () => {
+  const twoLinks = {
+    ...automation,
+    trackedLinks: [
+      { slug: "guide", label: null, destinationUrl: "https://g.test/guide" },
+      { slug: "call", label: "Book a free call", destinationUrl: "https://cal.test/hugh" },
+    ],
+    flow: { id: "flow_1", isActive: true, definition: {
+      entryStepKey: "q", fallbackStepKey: "both",
+      steps: [
+        { key: "q", message: "Call?", options: [
+          { key: "yes", label: "Yes, book a call", next: "both" },
+          { key: "no", label: "No, just the guide", next: "guide_only" },
+          { key: "call", label: "Call only", next: "call_only" },
+        ] },
+        { key: "both", message: "Both 👇", deliverLink: true },
+        { key: "guide_only", message: "Guide 👇", deliverLink: "primary" },
+        { key: "call_only", message: "Call 👇", deliverLink: "secondary" },
+      ],
+    } },
+  };
+  const buttonsSent = () => mockSends.sendDirectMessageWithLinkButton.mock.calls[0][0].buttons;
+
+  it("true sends every tracked link, primary label from the campaign", async () => {
+    await handleFlowPostback({ accessToken: ctx, automation: twoLinks, userId: "u_1", commenterName: null, payload: "flow:flow_1:q:yes" });
+    expect(buttonsSent()).toEqual([
+      { title: "Get The Free Guide", url: "https://x.test/r/guide?c=u_1" },
+      { title: "Book a free call", url: "https://x.test/r/call?c=u_1" },
+    ]);
+  });
+
+  it("\"primary\" sends only the first link", async () => {
+    await handleFlowPostback({ accessToken: ctx, automation: twoLinks, userId: "u_1", commenterName: null, payload: "flow:flow_1:q:no" });
+    expect(buttonsSent()).toEqual([{ title: "Get The Free Guide", url: "https://x.test/r/guide?c=u_1" }]);
+  });
+
+  it("\"secondary\" sends only the second link, and records the guide as delivered only when the guide went out", async () => {
+    await handleFlowPostback({ accessToken: ctx, automation: twoLinks, userId: "u_1", commenterName: null, payload: "flow:flow_1:q:call" });
+    expect(buttonsSent()).toEqual([{ title: "Book a free call", url: "https://x.test/r/call?c=u_1" }]);
+    expect(mockContacts.recordGuideDelivery).not.toHaveBeenCalled();
+  });
+});
+
 describe("a stored definition that no longer validates", () => {
   const broken = { ...automation, flow: { id: "flow_1", isActive: true, definition: { entryStepKey: "nope", fallbackStepKey: "x", steps: [] } } };
 
