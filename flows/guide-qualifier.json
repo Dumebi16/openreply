@@ -1,0 +1,32 @@
+{
+  "name": "Guide qualifier",
+  "definition": {
+    "entryStepKey": "who",
+    "fallbackStepKey": "any_link",
+    "steps": [
+      {
+        "key": "who",
+        "message": "Quick one before I send it 👇 Are you running a business already, or just getting started?",
+        "options": [
+          { "key": "owner", "label": "Running a business", "next": "owner_link" },
+          { "key": "starter", "label": "Just starting", "next": "starter_link" }
+        ]
+      },
+      {
+        "key": "owner_link",
+        "message": "Here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇\n\nAnd when you're ready to systemise the whole business, the $99 Business Systems Blueprint is the next step: https://agamaco.gumroad.com/l/business-systems-blueprint",
+        "deliverLink": true
+      },
+      {
+        "key": "starter_link",
+        "message": "Here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇\n\nTip: set the email up first, everything else hangs off it.",
+        "deliverLink": true
+      },
+      {
+        "key": "any_link",
+        "message": "Either way, here you go bro 🔥 the full step-by-step to own your business email for basically free. Grab it below 👇",
+        "deliverLink": true
+      }
+    ]
+  }
+}
