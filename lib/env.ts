@@ -50,6 +50,24 @@ export function getMetaGraphApiVersion(): string {
   return process.env.META_GRAPH_API_VERSION ?? "v25.0";
 }
 
+/** OpenRouter key used for Jev flow-reply classification. Optional: without it,
+ *  typed replies always take the flow's fallback step. */
+export function getOpenRouterApiKey(): string | null {
+  const key = process.env.OPENROUTER_API_KEY?.trim();
+  return key ? key : null;
+}
+
+export function getJevModel(): string {
+  return process.env.JEV_MODEL?.trim() || "typesafe/jev-1.13";
+}
+
+/** Minimum Jev confidence to act on a classified reply (0..1, default 0.6). */
+export function getFlowMinConfidence(): number {
+  const raw = Number(process.env.FLOW_MIN_CONFIDENCE);
+  if (!Number.isFinite(raw)) return 0.6;
+  return Math.min(1, Math.max(0, raw));
+}
+
 /**
  * The public demo, and the only host where sign-in is blocked. This repo is
  * something other people clone and deploy; a self-hoster's own domain must
