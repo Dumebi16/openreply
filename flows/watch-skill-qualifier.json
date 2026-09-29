@@ -1,0 +1,46 @@
+{
+  "name": "Watch skill qualifier",
+  "definition": {
+    "entryStepKey": "who",
+    "fallbackStepKey": "any_link",
+    "steps": [
+      {
+        "key": "who",
+        "message": "Quick one before I send it 👇 Are you running a business already, or just getting started?",
+        "options": [
+          { "key": "owner", "label": "Running a business", "next": "owner_call" },
+          { "key": "starter", "label": "Just starting", "next": "starter_link" }
+        ]
+      },
+      {
+        "key": "owner_call",
+        "message": "Nice 🙌 Want a free 30-min call to map out the systems that'd save you the most time?",
+        "options": [
+          { "key": "yes", "label": "Yes, book a call", "next": "yes_call" },
+          { "key": "no", "label": "No, just the guide", "next": "no_guide" }
+        ],
+        "fallbackNext": "yes_call"
+      },
+      {
+        "key": "yes_call",
+        "message": "Love it 🔥 Grab a slot below, and the watch skill setup guide is yours too 👇",
+        "deliverLink": true
+      },
+      {
+        "key": "no_guide",
+        "message": "All good bro 🔥 here's the full watch skill setup — guide + the copy-paste install prompt 👇",
+        "deliverLink": "primary"
+      },
+      {
+        "key": "starter_link",
+        "message": "Here you go bro 🔥 the full watch skill setup — your AI watches any video for you. Guide + the one-shot install prompt 👇\n\nTip: run it on a video you've been putting off watching.",
+        "deliverLink": "primary"
+      },
+      {
+        "key": "any_link",
+        "message": "Either way, here you go bro 🔥 the full watch skill setup — guide + install prompt 👇",
+        "deliverLink": "primary"
+      }
+    ]
+  }
+}
